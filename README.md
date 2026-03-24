@@ -18,6 +18,7 @@ go run ./cmd/server
 ```
 
 Backend defaults to `http://localhost:8080`.
+You can override with local-only env in `backend/.env.local`.
 
 ### 2) Frontend
 
@@ -28,12 +29,7 @@ npm run dev
 ```
 
 Frontend runs on `http://localhost:3000`.
-
-Set API URL:
-
-```powershell
-$env:NEXT_PUBLIC_API_BASE_URL="http://localhost:8080"
-```
+API URL is read from local-only `frontend/.env.local`.
 
 ## API endpoints
 

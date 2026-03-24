@@ -5,10 +5,13 @@ frontend/.next/
 # Go
 backend/bin/
 
-# Env files
-.env
-.env.*
-frontend/.env.local
+# Env files (local-only)
+**/.env
+**/.env.local
+**/.env.development.local
+**/.env.test.local
+**/.env.production.local
+!**/.env.example
 
 # OS/editor
 .DS_Store
