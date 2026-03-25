@@ -26,13 +26,13 @@ export default function ProfilePage() {
   }, []);
 
   return (
-    <section className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-6">
-      <h1 className="text-2xl font-semibold text-slate-100">Profile</h1>
-      <p className="mt-2 text-sm text-slate-400">Data source: /api/profile</p>
+    <section className="rounded-xl border border-white/25 bg-black p-6">
+      <h1 className="text-2xl font-semibold text-zinc-100">Profile</h1>
+      <p className="mt-2 text-sm text-zinc-400">Data source: /api/profile</p>
 
-      {error && <p className="mt-6 rounded-md border border-rose-500/30 bg-rose-500/10 p-3 text-rose-300">{error}</p>}
+      {error && <p className="mt-6 rounded-md border border-white/30 bg-zinc-950 p-3 text-zinc-200">{error}</p>}
 
-      {!error && !profile && <p className="mt-6 text-slate-300">Loading profile...</p>}
+      {!error && !profile && <p className="mt-6 text-zinc-300">Loading profile...</p>}
 
       {profile && (
         <div className="mt-6 grid gap-3 sm:grid-cols-2">
@@ -48,9 +48,9 @@ export default function ProfilePage() {
 
 function Card({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-4">
-      <p className="text-xs uppercase tracking-[0.2em] text-slate-400">{label}</p>
-      <p className="mt-2 text-xl font-semibold text-slate-100">{value}</p>
+    <div className="rounded-lg border border-white/20 bg-black p-4">
+      <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">{label}</p>
+      <p className="mt-2 text-xl font-semibold text-zinc-100">{value}</p>
     </div>
   );
 }

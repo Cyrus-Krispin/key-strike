@@ -8,14 +8,14 @@ const links = [
 
 export function Navbar() {
   return (
-    <nav className="flex items-center justify-between rounded-lg border border-slate-700/70 bg-slate-900/80 px-4 py-3">
-      <div className="text-lg font-semibold tracking-wide text-cyan-300">Key Strike</div>
+    <nav className="flex items-center justify-between rounded-lg border border-white/25 bg-black px-4 py-3">
+      <div className="text-lg font-semibold tracking-wide text-white">Key Strike</div>
       <div className="flex gap-2">
         {links.map((link) => (
           <Link
             key={link.href}
             href={link.href}
-            className="rounded-md px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800 hover:text-cyan-300"
+            className="rounded-md px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-900 hover:text-white"
           >
             {link.label}
           </Link>

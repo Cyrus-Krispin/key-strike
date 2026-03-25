@@ -7,8 +7,8 @@
 }
 
 body {
-  background: radial-gradient(circle at top, #1a1f2e 0%, #0b0f19 45%, #070a12 100%);
-  color: #e5e7eb;
+  background: #000;
+  color: #f5f5f5;
   min-height: 100vh;
 }
 
