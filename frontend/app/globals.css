@@ -84,7 +84,7 @@ a {
     transform: translate(-50%, -50%) scale(1);
   }
   100% {
-    opacity: 0.8;
+    opacity: 0;
     transform: translate(-50%, -50%) scale(1.18);
   }
 }
@@ -117,7 +117,7 @@ a {
 }
 
 .countdown-pop {
-  animation: countdown-pop 0.9s ease-out;
+  animation: countdown-pop 1s ease-out forwards;
 }
 
 .vs-diagonal-line {

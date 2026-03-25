@@ -367,7 +367,7 @@ export default function PlayPage() {
       {countdownValue !== null && (
         <div
           key={countdownValue}
-          className="countdown-pop pointer-events-none absolute left-1/2 top-[38%] z-20 select-none text-[clamp(4rem,16vw,10rem)] leading-none text-white md:top-[36%]"
+          className="countdown-pop pointer-events-none absolute left-1/2 top-[38%] z-20 -translate-x-1/2 -translate-y-1/2 select-none text-[clamp(4rem,16vw,10rem)] leading-none text-white md:top-[36%]"
         >
           {countdownValue}
         </div>
