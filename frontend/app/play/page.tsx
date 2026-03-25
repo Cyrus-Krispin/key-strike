@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import {
   applyPlayerBackspace,
   applyPlayerInput,
@@ -45,6 +46,9 @@ const PLAYER_PROFILE: MatchProfile = {
 };
 
 export default function PlayPage() {
+  const router = useRouter();
+  const pathname = usePathname();
+
   const [screen, setScreen] = useState<ScreenPhase>("lobby");
   const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("medium");
   const [pendingMatch, setPendingMatch] = useState<MatchContext | null>(null);
@@ -52,19 +56,53 @@ export default function PlayPage() {
   const [game, setGame] = useState<GameState | null>(null);
   const [playerReady, setPlayerReady] = useState(false);
   const [opponentReady, setOpponentReady] = useState(false);
+  const [routeMode, setRouteMode] = useState<PlayMode | null>(null);
+  const [routeDifficulty, setRouteDifficulty] = useState<BotDifficulty | null>(null);
+
+  const routeBattleId = useMemo(() => {
+    const match = pathname.match(/^\/play\/([^/]+)$/);
+    return match ? decodeURIComponent(match[1]) : null;
+  }, [pathname]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    setRouteMode(parseRouteMode(params.get("mode")));
+    setRouteDifficulty(parseRouteDifficulty(params.get("difficulty")));
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!routeBattleId) return;
+
+    const mode: PlayMode = routeMode ?? "bot";
+    const difficulty = mode === "bot" ? routeDifficulty ?? "medium" : null;
+    const context: MatchContext = {
+      battleId: routeBattleId,
+      mode,
+      difficulty,
+      player: PLAYER_PROFILE,
+      opponent: buildOpponentProfile(mode, difficulty)
+    };
+
+    setPendingMatch(null);
+    setMatchContext((prev) => (prev?.battleId === context.battleId ? prev : context));
+    setScreen("vs_intro");
+    setGame(null);
+    setPlayerReady(false);
+    setOpponentReady(false);
+  }, [routeBattleId, routeMode, routeDifficulty]);
 
   useEffect(() => {
     if (!pendingMatch || pendingMatch.mode === "bot") return;
 
     const waitMs = pendingMatch.mode === "ranked" ? 3000 : 2200;
     const timer = setTimeout(() => {
-      setMatchContext(pendingMatch);
       setPendingMatch(null);
-      setScreen("vs_intro");
+      router.push(buildBattleRoute(pendingMatch));
     }, waitMs);
 
     return () => clearTimeout(timer);
-  }, [pendingMatch]);
+  }, [pendingMatch, router]);
 
   useEffect(() => {
     if (screen !== "vs_intro" || !matchContext) return;
@@ -229,8 +267,7 @@ export default function PlayPage() {
 
     if (mode === "bot") {
       setPendingMatch(null);
-      setMatchContext(context);
-      setScreen("vs_intro");
+      router.push(buildBattleRoute(context));
       return;
     }
 
@@ -239,6 +276,7 @@ export default function PlayPage() {
   };
 
   const handleBackToLobby = () => {
+    router.push("/");
     setScreen("lobby");
     setMatchContext(null);
     setPendingMatch(null);
@@ -246,6 +284,10 @@ export default function PlayPage() {
     setPlayerReady(false);
     setOpponentReady(false);
   };
+
+  if (!matchContext && routeBattleId) {
+    return <section className="fixed inset-0 z-50 h-[100dvh] w-screen bg-black" />;
+  }
 
   if (screen === "lobby") {
     return (
@@ -527,6 +569,28 @@ function OpponentProgressLine({ progress }: { progress: number }) {
       </div>
     </div>
   );
+}
+
+function buildBattleRoute(context: MatchContext) {
+  const params = new URLSearchParams({ mode: context.mode });
+  if (context.difficulty) {
+    params.set("difficulty", context.difficulty);
+  }
+  return `/play/${context.battleId}?${params.toString()}`;
+}
+
+function parseRouteMode(value: string | null): PlayMode | null {
+  if (value === "ranked" || value === "casual" || value === "bot") {
+    return value;
+  }
+  return null;
+}
+
+function parseRouteDifficulty(value: string | null): BotDifficulty | null {
+  if (value === "easy" || value === "medium" || value === "hard") {
+    return value;
+  }
+  return null;
 }
 
 function getEnemyInterval(level: BotDifficulty | null) {
