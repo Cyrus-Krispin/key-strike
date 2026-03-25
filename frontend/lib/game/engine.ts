@@ -38,7 +38,7 @@ export type GameState = {
 
 const MAX_HEALTH = 100;
 const MAX_ENERGY = 100;
-const COUNTDOWN_MS = 2500;
+const COUNTDOWN_MS = 3000;
 const ENEMY_TYPE_INTERVAL_MS = 280;
 
 const SENTENCE_BANK = [
@@ -54,14 +54,18 @@ export function createInitialGameState(input?: {
   enemyName?: string;
   nowMs?: number;
   seed?: number;
+  startActive?: boolean;
+  enemyTypeIntervalMs?: number;
 }): GameState {
   const nowMs = input?.nowMs ?? Date.now();
-  const countdownEndsAtMs = nowMs + COUNTDOWN_MS;
+  const startActive = input?.startActive ?? false;
+  const countdownEndsAtMs = startActive ? nowMs : nowMs + COUNTDOWN_MS;
   const seed = input?.seed ?? nowMs;
+  const enemyTypeIntervalMs = input?.enemyTypeIntervalMs ?? ENEMY_TYPE_INTERVAL_MS;
   const firstSentence = pickSentence(seed);
 
   return {
-    phase: "countdown",
+    phase: startActive ? "active" : "countdown",
     winner: null,
     nowMs,
     countdownEndsAtMs,
@@ -71,8 +75,8 @@ export function createInitialGameState(input?: {
     player: createPlayer("player", input?.playerName ?? "You"),
     enemy: createPlayer("enemy", input?.enemyName ?? "Rival"),
     rngSeed: firstSentence.nextSeed,
-    enemyNextTypeAtMs: countdownEndsAtMs + ENEMY_TYPE_INTERVAL_MS,
-    enemyTypeIntervalMs: ENEMY_TYPE_INTERVAL_MS
+    enemyNextTypeAtMs: nowMs + enemyTypeIntervalMs,
+    enemyTypeIntervalMs
   };
 }
 
