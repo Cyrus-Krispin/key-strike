@@ -8,18 +8,12 @@ import (
 
 func NewRouter(h *handlers.Handler) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", method(http.MethodGet, h.Health))
-	mux.HandleFunc("/api/profile", method(http.MethodGet, h.Profile))
-	mux.HandleFunc("/api/matchmaking/status", method(http.MethodGet, h.MatchmakingStatus))
+	mux.HandleFunc("GET /health", h.Health)
+	mux.HandleFunc("GET /api/profile", h.Profile)
+	mux.HandleFunc("GET /api/matchmaking/status", h.MatchmakingStatus)
+	mux.HandleFunc("POST /api/matchmaking/queue", h.MatchmakingQueue)
+	mux.HandleFunc("POST /api/matchmaking/cancel", h.MatchmakingCancel)
+	mux.HandleFunc("GET /api/rooms/{roomId}/state", h.RoomState)
+	mux.HandleFunc("GET /ws/room", h.RoomWebSocket)
 	return mux
-}
-
-func method(allowed string, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != allowed {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		next(w, r)
-	}
 }

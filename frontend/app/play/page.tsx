@@ -1,19 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  applyPlayerBackspace,
-  applyPlayerInput,
-  createInitialGameState,
-  getTypingProgressPercent,
-  tickGame,
-  type GameState,
-  type TypedEntry
-} from "@/lib/game/engine";
+  buildWebSocketUrl,
+  cancelMatchmaking,
+  getMatchmakingStatus,
+  getRoomState,
+  queueMatchmaking,
+  type BotDifficulty,
+  type MatchmakingMode,
+  type RoomPlayerSnapshot,
+  type RoomSnapshot
+} from "@/lib/api";
 
-type PlayMode = "ranked" | "casual" | "bot";
-type BotDifficulty = "easy" | "medium" | "hard";
+type PlayMode = MatchmakingMode;
 type ScreenPhase = "lobby" | "vs_intro" | "battle";
 
 type MatchProfile = {
@@ -33,7 +34,12 @@ type MatchContext = {
   opponent: MatchProfile;
 };
 
-const TICK_MS = 60;
+type SocketServerEvent = {
+  type: string;
+  payload?: RoomSnapshot;
+  error?: string;
+};
+
 const VS_INTRO_MS = 4500;
 
 const PLAYER_PROFILE: MatchProfile = {
@@ -45,64 +51,197 @@ const PLAYER_PROFILE: MatchProfile = {
   avatar: "KB-01"
 };
 
+const PLAYER_ID_STORAGE_KEY = "key_strike_player_id";
+const PLAYER_NAME_STORAGE_KEY = "key_strike_player_name";
+
 export default function PlayPage() {
   const router = useRouter();
   const pathname = usePathname();
+  const socketRef = useRef<WebSocket | null>(null);
+  const queueRequestIdRef = useRef(0);
+  const readyRequestSentRef = useRef(false);
 
   const [screen, setScreen] = useState<ScreenPhase>("lobby");
   const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("medium");
   const [pendingMatch, setPendingMatch] = useState<MatchContext | null>(null);
   const [matchContext, setMatchContext] = useState<MatchContext | null>(null);
-  const [game, setGame] = useState<GameState | null>(null);
-  const [playerReady, setPlayerReady] = useState(false);
-  const [opponentReady, setOpponentReady] = useState(false);
+  const [roomState, setRoomState] = useState<RoomSnapshot | null>(null);
   const [routeMode, setRouteMode] = useState<PlayMode | null>(null);
   const [routeDifficulty, setRouteDifficulty] = useState<BotDifficulty | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [localPlayer, setLocalPlayer] = useState<{ id: string; name: string } | null>(null);
 
   const routeBattleId = useMemo(() => {
     const match = pathname.match(/^\/play\/([^/]+)$/);
     return match ? decodeURIComponent(match[1]) : null;
   }, [pathname]);
 
+  const selfPlayer = useMemo(() => {
+    if (!roomState || !localPlayer) return null;
+    return roomState.players.find((player) => player.id === localPlayer.id) ?? null;
+  }, [roomState, localPlayer]);
+
+  const opponentPlayer = useMemo(() => {
+    if (!roomState || !localPlayer) return null;
+    return roomState.players.find((player) => player.id !== localPlayer.id) ?? null;
+  }, [roomState, localPlayer]);
+
+  const playerReady = Boolean(selfPlayer?.ready);
+  const opponentReady = Boolean(opponentPlayer?.ready);
+
+  useEffect(() => {
+    readyRequestSentRef.current = playerReady;
+  }, [playerReady]);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
+
+    let playerID = window.localStorage.getItem(PLAYER_ID_STORAGE_KEY);
+    if (!playerID) {
+      playerID = `player-${Math.random().toString(36).slice(2, 10)}`;
+      window.localStorage.setItem(PLAYER_ID_STORAGE_KEY, playerID);
+    }
+
+    let playerName = window.localStorage.getItem(PLAYER_NAME_STORAGE_KEY);
+    if (!playerName) {
+      playerName = `Typer-${playerID.slice(-4).toUpperCase()}`;
+      window.localStorage.setItem(PLAYER_NAME_STORAGE_KEY, playerName);
+    }
+
+    setLocalPlayer({ id: playerID, name: playerName });
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
     const params = new URLSearchParams(window.location.search);
     setRouteMode(parseRouteMode(params.get("mode")));
     setRouteDifficulty(parseRouteDifficulty(params.get("difficulty")));
   }, [pathname]);
 
   useEffect(() => {
-    if (!routeBattleId) return;
+    if (routeBattleId) return;
 
-    const mode: PlayMode = routeMode ?? "bot";
-    const difficulty = mode === "bot" ? routeDifficulty ?? "medium" : null;
-    const context: MatchContext = {
-      battleId: routeBattleId,
-      mode,
-      difficulty,
-      player: PLAYER_PROFILE,
-      opponent: buildOpponentProfile(mode, difficulty)
-    };
+    setScreen("lobby");
+    setMatchContext(null);
+    setRoomState(null);
+    setConnectionError(null);
+    setSocketConnected(false);
 
-    setPendingMatch(null);
-    setMatchContext((prev) => (prev?.battleId === context.battleId ? prev : context));
-    setScreen("vs_intro");
-    setGame(null);
-    setPlayerReady(false);
-    setOpponentReady(false);
-  }, [routeBattleId, routeMode, routeDifficulty]);
+    if (socketRef.current) {
+      socketRef.current.close();
+      socketRef.current = null;
+    }
+  }, [routeBattleId]);
 
   useEffect(() => {
-    if (!pendingMatch || pendingMatch.mode === "bot") return;
+    if (!routeBattleId || !localPlayer) return;
 
-    const waitMs = pendingMatch.mode === "ranked" ? 3000 : 2200;
-    const timer = setTimeout(() => {
-      setPendingMatch(null);
-      router.push(buildBattleRoute(pendingMatch));
-    }, waitMs);
+    let cancelled = false;
+    setConnectionError(null);
 
-    return () => clearTimeout(timer);
-  }, [pendingMatch, router]);
+    const bootstrapRoom = async () => {
+      try {
+        const snapshot = await getRoomState(routeBattleId);
+        if (cancelled) return;
+
+        setRoomState(snapshot);
+        const mode = routeMode ?? snapshot.mode;
+        const difficulty = mode === "bot" ? routeDifficulty ?? inferBotDifficulty(snapshot) : null;
+        setMatchContext(buildMatchContext(snapshot, localPlayer, mode, difficulty));
+        setPendingMatch(null);
+        setScreen("vs_intro");
+      } catch {
+        if (cancelled) return;
+        setConnectionError("Unable to load room state.");
+      }
+    };
+
+    bootstrapRoom();
+    return () => {
+      cancelled = true;
+    };
+  }, [routeBattleId, localPlayer, routeMode, routeDifficulty]);
+
+  useEffect(() => {
+    if (!routeBattleId || !localPlayer) return;
+
+    const wsPath = `/ws/room?roomId=${encodeURIComponent(routeBattleId)}&playerId=${encodeURIComponent(localPlayer.id)}&playerName=${encodeURIComponent(localPlayer.name)}`;
+    const ws = new WebSocket(buildWebSocketUrl(wsPath));
+    socketRef.current = ws;
+
+    ws.onopen = () => {
+      setSocketConnected(true);
+      setConnectionError(null);
+    };
+
+    ws.onclose = () => {
+      setSocketConnected(false);
+    };
+
+    ws.onerror = () => {
+      setConnectionError("Realtime connection failed.");
+    };
+
+    ws.onmessage = (message) => {
+      try {
+        const event = JSON.parse(message.data) as SocketServerEvent;
+        if (event.type === "state_update" && event.payload) {
+          setRoomState(event.payload);
+          return;
+        }
+        if (event.type === "error" && event.error) {
+          setConnectionError(event.error);
+        }
+      } catch {
+        setConnectionError("Received invalid realtime payload.");
+      }
+    };
+
+    return () => {
+      ws.close();
+      if (socketRef.current === ws) {
+        socketRef.current = null;
+      }
+    };
+  }, [routeBattleId, localPlayer]);
+
+  useEffect(() => {
+    if (!roomState || !localPlayer) return;
+
+    const mode = routeMode ?? roomState.mode;
+    const difficulty = mode === "bot" ? routeDifficulty ?? inferBotDifficulty(roomState) : null;
+    setMatchContext(buildMatchContext(roomState, localPlayer, mode, difficulty));
+  }, [roomState, localPlayer, routeMode, routeDifficulty]);
+
+  useEffect(() => {
+    if (!pendingMatch || !localPlayer) return;
+
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const status = await getMatchmakingStatus(localPlayer.id);
+        if (cancelled) return;
+
+        if (status.status === "matched" && status.roomId) {
+          setPendingMatch(null);
+          const mode = status.mode ?? pendingMatch.mode;
+          const difficulty = mode === "bot" ? pendingMatch.difficulty : null;
+          router.push(buildBattleRoute(status.roomId, mode, difficulty));
+        }
+      } catch {
+        if (!cancelled) {
+          setConnectionError("Unable to poll matchmaking status.");
+        }
+      }
+    }, 1000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [pendingMatch, localPlayer, router]);
 
   useEffect(() => {
     if (screen !== "vs_intro" || !matchContext) return;
@@ -114,43 +253,13 @@ export default function PlayPage() {
     return () => clearTimeout(timer);
   }, [screen, matchContext]);
 
-  useEffect(() => {
-    if (screen !== "battle" || !matchContext) return;
-
-    setGame(null);
-    setPlayerReady(false);
-    setOpponentReady(false);
-
-    const readyDelayMs = matchContext.mode === "bot" ? 500 : 1400;
-    const timer = setTimeout(() => setOpponentReady(true), readyDelayMs);
-
-    return () => clearTimeout(timer);
-  }, [screen, matchContext]);
-
-  useEffect(() => {
-    if (screen !== "battle" || !matchContext) return;
-    if (!playerReady || !opponentReady) return;
-    if (game) return;
-
-    setGame(
-      createInitialGameState({
-        playerName: matchContext.player.name,
-        enemyName: matchContext.opponent.name,
-        startActive: false,
-        enemyTypeIntervalMs: getEnemyInterval(matchContext.difficulty)
-      })
-    );
-  }, [screen, matchContext, playerReady, opponentReady, game]);
-
-  useEffect(() => {
-    if (screen !== "battle" || !game) return;
-
-    const interval = setInterval(() => {
-      setGame((prev) => (prev ? tickGame(prev, Date.now()) : prev));
-    }, TICK_MS);
-
-    return () => clearInterval(interval);
-  }, [screen, game]);
+  const sendSocketEvent = useCallback((event: unknown) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    socket.send(JSON.stringify(event));
+  }, []);
 
   useEffect(() => {
     if (screen !== "battle") return;
@@ -171,27 +280,34 @@ export default function PlayPage() {
       if (!playerReady) {
         if (lowerKey === "f" || lowerKey === "j") {
           pressed.add(lowerKey);
-          if (pressed.has("f") && pressed.has("j")) {
+          if (pressed.has("f") && pressed.has("j") && !readyRequestSentRef.current) {
             event.preventDefault();
-            setPlayerReady(true);
+            readyRequestSentRef.current = true;
+            sendSocketEvent({
+              type: "player_ready",
+              payload: { ready: true }
+            });
           }
         }
         return;
       }
 
-      if (!game || game.phase !== "active") {
+      if (!roomState || roomState.phase !== "active") {
         return;
       }
 
       if (event.key === "Backspace") {
         event.preventDefault();
-        setGame((prev) => (prev ? applyPlayerBackspace(prev, Date.now()) : prev));
+        sendSocketEvent({ type: "input_backspace" });
         return;
       }
 
       if (event.key.length === 1) {
         event.preventDefault();
-        setGame((prev) => (prev ? applyPlayerInput(prev, event.key, Date.now()) : prev));
+        sendSocketEvent({
+          type: "input_char",
+          payload: { char: event.key }
+        });
       }
     };
 
@@ -209,7 +325,7 @@ export default function PlayPage() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [screen, playerReady, game]);
+  }, [screen, playerReady, roomState, sendSocketEvent]);
 
   useEffect(() => {
     const fullscreenScreen = screen === "vs_intro" || screen === "battle";
@@ -225,64 +341,111 @@ export default function PlayPage() {
     };
   }, [screen]);
 
-  const enemyProgress = game ? getTypingProgressPercent(game, "enemy") : 0;
-  const battleIsFullscreen = screen === "battle";
-  const countdownValue =
-    game && game.phase === "countdown" ? Math.max(1, Math.ceil((game.countdownEndsAtMs - game.nowMs) / 1000)) : null;
+  const enemyProgress = useMemo(() => {
+    if (!roomState || !opponentPlayer) return 0;
+    const sentenceLength = roomState.sentence.length;
+    if (!sentenceLength) return 0;
+    return Math.floor((opponentPlayer.cursor / sentenceLength) * 100);
+  }, [roomState, opponentPlayer]);
+
+  const countdownValue = roomState?.phase === "countdown" ? Math.max(1, roomState.countdownSecondsRemain) : null;
 
   const battleStatus = useMemo(() => {
+    if (connectionError) {
+      return connectionError;
+    }
+    if (routeBattleId && !socketConnected) {
+      return "Connecting to room...";
+    }
     if (!playerReady) {
       return "Press F + J together to mark ready.";
     }
     if (!opponentReady) {
       return "Waiting for opponent readiness...";
     }
-    if (!game) {
-      return "Preparing match start...";
+    if (!roomState) {
+      return "Syncing room state...";
     }
-    if (game.phase === "countdown") {
+    if (roomState.phase === "countdown") {
       return "Both ready. Countdown started.";
     }
-    if (game.phase === "ended") {
-      if (game.winner === "draw") return "Draw";
-      if (game.winner === "player") return "You win";
-      return "Opponent wins";
+    if (roomState.phase === "ended") {
+      if (!localPlayer) return "Match ended";
+      if (!roomState.winnerPlayerId) return "Draw";
+      return roomState.winnerPlayerId === localPlayer.id ? "You win" : "Opponent wins";
     }
     return "Type directly on the sentence. Mistypes stay red. Backspace fixes.";
-  }, [playerReady, opponentReady, game]);
+  }, [connectionError, routeBattleId, socketConnected, playerReady, opponentReady, roomState, localPlayer]);
 
-  const handleQueueMode = (mode: PlayMode) => {
-    setGame(null);
-    setPlayerReady(false);
-    setOpponentReady(false);
-
-    const difficulty = mode === "bot" ? botDifficulty : null;
-    const context: MatchContext = {
-      battleId: createBattleId(mode),
-      mode,
-      difficulty,
-      player: PLAYER_PROFILE,
-      opponent: buildOpponentProfile(mode, difficulty)
-    };
-
-    if (mode === "bot") {
-      setPendingMatch(null);
-      router.push(buildBattleRoute(context));
+  const handleQueueMode = async (mode: PlayMode) => {
+    if (!localPlayer) {
+      setConnectionError("Local player profile not ready. Refresh and try again.");
       return;
     }
 
+    setConnectionError(null);
+    setRoomState(null);
+    setMatchContext(null);
     setScreen("lobby");
-    setPendingMatch(context);
+
+    const difficulty = mode === "bot" ? botDifficulty : null;
+    const preview: MatchContext = {
+      battleId: createBattleId(mode),
+      mode,
+      difficulty,
+      player: {
+        ...PLAYER_PROFILE,
+        name: localPlayer.name
+      },
+      opponent: buildOpponentProfile(mode, difficulty)
+    };
+
+    setPendingMatch(preview);
+    const requestID = ++queueRequestIdRef.current;
+
+    try {
+      await cancelMatchmaking(localPlayer.id).catch(() => undefined);
+
+      const response = await queueMatchmaking({
+        playerId: localPlayer.id,
+        playerName: localPlayer.name,
+        mode,
+        difficulty: difficulty ?? undefined
+      });
+
+      if (queueRequestIdRef.current !== requestID) {
+        return;
+      }
+
+      if (response.status === "matched" && response.roomId) {
+        setPendingMatch(null);
+        router.push(buildBattleRoute(response.roomId, mode, difficulty));
+      }
+    } catch {
+      if (queueRequestIdRef.current === requestID) {
+        setPendingMatch(null);
+        setConnectionError("Failed to queue for matchmaking.");
+      }
+    }
   };
 
-  const handleBackToLobby = () => {
-    router.push("/");
-    setScreen("lobby");
-    setMatchContext(null);
+  const handleBackToLobby = async () => {
+    if (localPlayer) {
+      await cancelMatchmaking(localPlayer.id).catch(() => undefined);
+    }
+
+    if (socketRef.current) {
+      socketRef.current.close();
+      socketRef.current = null;
+    }
+
     setPendingMatch(null);
-    setGame(null);
-    setPlayerReady(false);
-    setOpponentReady(false);
+    setMatchContext(null);
+    setRoomState(null);
+    setConnectionError(null);
+    setSocketConnected(false);
+    setScreen("lobby");
+    router.push("/");
   };
 
   if (!matchContext && routeBattleId) {
@@ -296,8 +459,8 @@ export default function PlayPage() {
         <p className="mt-2 text-sm uppercase tracking-widest text-zinc-400">Battle modes</p>
 
         <div className="mt-6 grid gap-3 md:grid-cols-3">
-          <ModeCard title="Ranked" description="Competitive matchmaking with rating impact." onClick={() => handleQueueMode("ranked")} />
-          <ModeCard title="Casual" description="Relaxed matchmaking with no rating pressure." onClick={() => handleQueueMode("casual")} />
+          <ModeCard title="Ranked" description="Competitive matchmaking with rating impact." onClick={() => void handleQueueMode("ranked")} />
+          <ModeCard title="Casual" description="Relaxed matchmaking with no rating pressure." onClick={() => void handleQueueMode("casual")} />
 
           <div className="rounded-lg border border-white/20 bg-black p-4">
             <h2 className="text-xl text-white">Bot</h2>
@@ -321,12 +484,14 @@ export default function PlayPage() {
             <button
               className="mt-4 w-full rounded border border-white/40 bg-zinc-950 px-3 py-2 text-sm text-white hover:bg-zinc-900"
               type="button"
-              onClick={() => handleQueueMode("bot")}
+              onClick={() => void handleQueueMode("bot")}
             >
               Start Bot Match
             </button>
           </div>
         </div>
+
+        {connectionError && <p className="mt-4 text-sm text-red-400">{connectionError}</p>}
 
         {pendingMatch && (
           <div className="fixed bottom-6 right-6 w-72 rounded-lg border border-white/25 bg-black p-4 shadow-xl shadow-black/70">
@@ -335,7 +500,7 @@ export default function PlayPage() {
               {labelMode(pendingMatch.mode)}
               {pendingMatch.difficulty ? ` (${pendingMatch.difficulty})` : ""}
             </p>
-            <p className="mt-1 text-xs text-zinc-400">Battle ID {pendingMatch.battleId}</p>
+            <p className="mt-1 text-xs text-zinc-400">Ticket {pendingMatch.battleId}</p>
             <div className="mt-3 flex items-center gap-2 text-xs text-zinc-300">
               <span className="inline-block h-2 w-2 animate-ping rounded-full bg-white" />
               <span>Searching opponent...</span>
@@ -354,15 +519,13 @@ export default function PlayPage() {
     return <VSIntro context={matchContext} durationMs={VS_INTRO_MS} />;
   }
 
+  const sentence = roomState?.sentence ?? "PRESS F + J TO READY";
+  const typed = selfPlayer?.typed ?? [];
+  const cursor = selfPlayer?.cursor ?? 0;
+
   return (
-    <section
-      className={
-        battleIsFullscreen
-          ? "fixed inset-0 z-50 h-[100dvh] w-screen overflow-hidden bg-black px-4 pb-6 pt-4 md:px-8 md:pb-8 md:pt-6"
-          : "relative min-h-[620px] rounded-xl border border-white/25 bg-black p-4"
-      }
-    >
-      <div className={battleIsFullscreen ? "absolute right-4 top-4 text-right md:right-8 md:top-6" : ""}>
+    <section className="fixed inset-0 z-50 h-[100dvh] w-screen overflow-hidden bg-black px-4 pb-6 pt-4 md:px-8 md:pb-8 md:pt-6">
+      <div className="absolute right-4 top-4 text-right md:right-8 md:top-6">
         <p className="text-xs uppercase tracking-[0.25em] text-zinc-400">Battle ID {matchContext.battleId}</p>
         <p className="mt-1 text-xs uppercase tracking-[0.2em] text-zinc-500">
           {labelMode(matchContext.mode)}
@@ -370,39 +533,18 @@ export default function PlayPage() {
         </p>
       </div>
 
-      <p
-        className={
-          battleIsFullscreen
-            ? "absolute left-1/2 top-4 w-[70%] -translate-x-1/2 text-center text-sm text-zinc-300 md:top-6"
-            : "mt-2 text-sm text-zinc-300"
-        }
-      >
-        {battleStatus}
-      </p>
+      <p className="absolute left-1/2 top-4 w-[70%] -translate-x-1/2 text-center text-sm text-zinc-300 md:top-6">{battleStatus}</p>
 
-      <div className={battleIsFullscreen ? "absolute left-4 top-24 w-[48%] max-w-xs md:left-10 md:top-24" : "absolute left-4 top-20 w-[42%] lg:w-60"}>
-        <Combatant profile={matchContext.opponent} health={game?.enemy.health ?? 100} energy={game?.enemy.energy ?? 0} />
+      <div className="absolute left-4 top-24 w-[48%] max-w-xs md:left-10 md:top-24">
+        <Combatant profile={matchContext.opponent} health={opponentPlayer?.health ?? 100} energy={0} />
       </div>
 
-      <div
-        className={battleIsFullscreen ? "absolute bottom-10 right-4 w-[48%] max-w-xs md:bottom-10 md:right-10" : "absolute bottom-8 right-4 w-[42%] lg:w-60"}
-      >
-        <Combatant profile={matchContext.player} health={game?.player.health ?? 100} energy={game?.player.energy ?? 0} alignRight />
+      <div className="absolute bottom-10 right-4 w-[48%] max-w-xs md:bottom-10 md:right-10">
+        <Combatant profile={matchContext.player} health={selfPlayer?.health ?? 100} energy={0} alignRight />
       </div>
 
-      <div
-        className={
-          battleIsFullscreen
-            ? "absolute left-1/2 top-1/2 w-[92%] -translate-x-1/2 -translate-y-1/2 text-center md:w-[76%]"
-            : "absolute left-1/2 top-1/2 w-[88%] -translate-x-1/2 -translate-y-1/2 text-center lg:w-[72%]"
-        }
-      >
-        <SentenceLine
-          sentence={game?.sentence.text ?? "PRESS F + J TO READY"}
-          typed={game?.player.typed ?? []}
-          cursor={game?.player.cursor ?? 0}
-          showCursor={Boolean(game)}
-        />
+      <div className="absolute left-1/2 top-1/2 w-[92%] -translate-x-1/2 -translate-y-1/2 text-center md:w-[76%]">
+        <SentenceLine sentence={sentence} typed={typed} cursor={cursor} showCursor />
         <OpponentProgressLine progress={enemyProgress} />
       </div>
 
@@ -416,13 +558,9 @@ export default function PlayPage() {
       )}
 
       <button
-        className={
-          battleIsFullscreen
-            ? "absolute left-4 top-4 rounded border border-white/30 px-3 py-1.5 text-xs uppercase tracking-wider text-zinc-300 hover:border-white/70 hover:text-white"
-            : "absolute bottom-4 left-4 rounded border border-white/30 px-3 py-1.5 text-xs uppercase tracking-wider text-zinc-300 hover:border-white/70 hover:text-white"
-        }
+        className="absolute left-4 top-4 rounded border border-white/30 px-3 py-1.5 text-xs uppercase tracking-wider text-zinc-300 hover:border-white/70 hover:text-white"
         type="button"
-        onClick={handleBackToLobby}
+        onClick={() => void handleBackToLobby()}
       >
         Back To Modes
       </button>
@@ -527,7 +665,9 @@ function Combatant({
       <p className="text-xs uppercase tracking-wider text-zinc-500">{profile.avatar}</p>
       <p className="text-lg text-white">{profile.name}</p>
       <p className="text-xs text-zinc-400">Rank {profile.rank}</p>
-      <p className="mt-1 text-xs uppercase tracking-wider text-zinc-400">HP {Math.floor(health)} | EN {Math.floor(energy)}</p>
+      <p className="mt-1 text-xs uppercase tracking-wider text-zinc-400">
+        HP {Math.floor(health)} | EN {Math.floor(energy)}
+      </p>
     </div>
   );
 }
@@ -539,7 +679,7 @@ function SentenceLine({
   showCursor
 }: {
   sentence: string;
-  typed: TypedEntry[];
+  typed: RoomPlayerSnapshot["typed"];
   cursor: number;
   showCursor: boolean;
 }) {
@@ -571,12 +711,12 @@ function OpponentProgressLine({ progress }: { progress: number }) {
   );
 }
 
-function buildBattleRoute(context: MatchContext) {
-  const params = new URLSearchParams({ mode: context.mode });
-  if (context.difficulty) {
-    params.set("difficulty", context.difficulty);
+function buildBattleRoute(roomID: string, mode: PlayMode, difficulty: BotDifficulty | null) {
+  const params = new URLSearchParams({ mode });
+  if (difficulty) {
+    params.set("difficulty", difficulty);
   }
-  return `/play/${context.battleId}?${params.toString()}`;
+  return `/play/${roomID}?${params.toString()}`;
 }
 
 function parseRouteMode(value: string | null): PlayMode | null {
@@ -593,12 +733,6 @@ function parseRouteDifficulty(value: string | null): BotDifficulty | null {
   return null;
 }
 
-function getEnemyInterval(level: BotDifficulty | null) {
-  if (level === "easy") return 360;
-  if (level === "hard") return 210;
-  return 280;
-}
-
 function labelMode(mode: PlayMode) {
   if (mode === "ranked") return "Ranked";
   if (mode === "casual") return "Casual";
@@ -609,10 +743,34 @@ function createBattleId(mode: PlayMode) {
   return `${mode}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function buildOpponentProfile(mode: PlayMode, difficulty: BotDifficulty | null): MatchProfile {
+function buildMatchContext(
+  snapshot: RoomSnapshot,
+  localPlayer: { id: string; name: string },
+  mode: PlayMode,
+  difficulty: BotDifficulty | null
+): MatchContext {
+  const me = snapshot.players.find((player) => player.id === localPlayer.id);
+  const opponent = snapshot.players.find((player) => player.id !== localPlayer.id);
+
+  const playerProfile: MatchProfile = {
+    ...PLAYER_PROFILE,
+    name: me?.name || localPlayer.name
+  };
+
+  const opponentProfile = buildOpponentProfile(mode, difficulty, opponent?.name);
+  return {
+    battleId: snapshot.roomId,
+    mode,
+    difficulty,
+    player: playerProfile,
+    opponent: opponentProfile
+  };
+}
+
+function buildOpponentProfile(mode: PlayMode, difficulty: BotDifficulty | null, name?: string): MatchProfile {
   if (mode === "ranked") {
     return {
-      name: "ApexTyper",
+      name: name || "ApexTyper",
       rank: "Gold I",
       winRate: "62%",
       wpm: 84,
@@ -623,7 +781,7 @@ function buildOpponentProfile(mode: PlayMode, difficulty: BotDifficulty | null):
 
   if (mode === "casual") {
     return {
-      name: "TypeRunner",
+      name: name || "TypeRunner",
       rank: "Bronze I",
       winRate: "49%",
       wpm: 68,
@@ -634,7 +792,7 @@ function buildOpponentProfile(mode: PlayMode, difficulty: BotDifficulty | null):
 
   if (difficulty === "easy") {
     return {
-      name: "Bot Easy",
+      name: name || "Bot Easy",
       rank: "Training",
       winRate: "40%",
       wpm: 52,
@@ -644,7 +802,7 @@ function buildOpponentProfile(mode: PlayMode, difficulty: BotDifficulty | null):
   }
   if (difficulty === "hard") {
     return {
-      name: "Bot Hard",
+      name: name || "Bot Hard",
       rank: "Elite",
       winRate: "78%",
       wpm: 95,
@@ -653,11 +811,18 @@ function buildOpponentProfile(mode: PlayMode, difficulty: BotDifficulty | null):
     };
   }
   return {
-    name: "Bot Medium",
+    name: name || "Bot Medium",
     rank: "Standard",
     winRate: "58%",
     wpm: 74,
     streak: 4,
     avatar: "KB-B2"
   };
+}
+
+function inferBotDifficulty(snapshot: RoomSnapshot): BotDifficulty {
+  const name = snapshot.players.map((player) => player.name.toLowerCase()).join(" ");
+  if (name.includes("hard")) return "hard";
+  if (name.includes("easy")) return "easy";
+  return "medium";
 }
