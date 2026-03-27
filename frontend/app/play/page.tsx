@@ -341,13 +341,6 @@ export default function PlayPage() {
     };
   }, [screen]);
 
-  const enemyProgress = useMemo(() => {
-    if (!roomState || !opponentPlayer) return 0;
-    const sentenceLength = roomState.sentence.length;
-    if (!sentenceLength) return 0;
-    return Math.floor((opponentPlayer.cursor / sentenceLength) * 100);
-  }, [roomState, opponentPlayer]);
-
   const countdownValue = roomState?.phase === "countdown" ? Math.max(1, roomState.countdownSecondsRemain) : null;
 
   const battleStatus = useMemo(() => {
@@ -374,7 +367,7 @@ export default function PlayPage() {
       if (!roomState.winnerPlayerId) return "Draw";
       return roomState.winnerPlayerId === localPlayer.id ? "You win" : "Opponent wins";
     }
-    return "Type directly on the sentence. Mistypes stay red. Backspace fixes.";
+    return "Type directly on the sentence. Space jumps to the next word. Backspace is locked to the current word.";
   }, [connectionError, routeBattleId, socketConnected, playerReady, opponentReady, roomState, localPlayer]);
 
   const handleQueueMode = async (mode: PlayMode) => {
@@ -536,16 +529,22 @@ export default function PlayPage() {
       <p className="absolute left-1/2 top-4 w-[70%] -translate-x-1/2 text-center text-sm text-zinc-300 md:top-6">{battleStatus}</p>
 
       <div className="absolute left-4 top-24 w-[48%] max-w-xs md:left-10 md:top-24">
-        <Combatant profile={matchContext.opponent} health={opponentPlayer?.health ?? 100} energy={0} />
+        <Combatant profile={matchContext.opponent} />
       </div>
 
       <div className="absolute bottom-10 right-4 w-[48%] max-w-xs md:bottom-10 md:right-10">
-        <Combatant profile={matchContext.player} health={selfPlayer?.health ?? 100} energy={0} alignRight />
+        <Combatant profile={matchContext.player} alignRight />
       </div>
 
       <div className="absolute left-1/2 top-1/2 w-[92%] -translate-x-1/2 -translate-y-1/2 text-center md:w-[76%]">
-        <SentenceLine sentence={sentence} typed={typed} cursor={cursor} showCursor />
-        <OpponentProgressLine progress={enemyProgress} />
+        <SentenceLine
+          sentence={sentence}
+          typed={typed}
+          cursor={cursor}
+          showCursor
+          opponentTyped={opponentPlayer?.typed ?? []}
+          opponentCursor={opponentPlayer?.cursor ?? 0}
+        />
       </div>
 
       {countdownValue !== null && (
@@ -651,13 +650,9 @@ function StatLine({
 
 function Combatant({
   profile,
-  health,
-  energy,
   alignRight = false
 }: {
   profile: MatchProfile;
-  health: number;
-  energy: number;
   alignRight?: boolean;
 }) {
   return (
@@ -665,9 +660,6 @@ function Combatant({
       <p className="text-xs uppercase tracking-wider text-zinc-500">{profile.avatar}</p>
       <p className="text-lg text-white">{profile.name}</p>
       <p className="text-xs text-zinc-400">Rank {profile.rank}</p>
-      <p className="mt-1 text-xs uppercase tracking-wider text-zinc-400">
-        HP {Math.floor(health)} | EN {Math.floor(energy)}
-      </p>
     </div>
   );
 }
@@ -676,38 +668,61 @@ function SentenceLine({
   sentence,
   typed,
   cursor,
-  showCursor
+  showCursor,
+  opponentTyped,
+  opponentCursor
 }: {
   sentence: string;
   typed: RoomPlayerSnapshot["typed"];
   cursor: number;
   showCursor: boolean;
+  opponentTyped: RoomPlayerSnapshot["typed"];
+  opponentCursor: number;
 }) {
+  const tokens = sentence.match(/\S+|\s+/g) ?? [];
+  const segments = tokens.map((token) => ({ token, chars: token.split("") }));
+  let nextIndex = 0;
+
+  const renderChar = (expectedChar: string, index: number) => {
+    const entry = typed[index];
+    const textClass = entry ? (entry.correct ? "text-white" : "text-red-500") : "text-zinc-500";
+    const opponentEntry = opponentTyped[index];
+    const opponentTracked = index < opponentCursor && Boolean(opponentEntry);
+    const progressClass = !opponentTracked
+      ? "bg-transparent"
+      : opponentEntry.correct
+        ? "bg-zinc-600/55"
+        : "bg-red-800/45";
+    const showOpponentCursor = index === opponentCursor;
+
+    return (
+      <span key={index} className="relative inline-block pb-[6px]">
+        {showCursor && index === cursor && <span className="absolute -left-1 top-0 animate-pulse text-white">|</span>}
+        {showOpponentCursor && <span className="absolute bottom-0 left-0 h-[6px] w-px bg-zinc-500/70" />}
+        <span className={textClass}>{expectedChar === " " ? "\u00A0" : expectedChar}</span>
+        <span className={`absolute bottom-0 left-0 right-0 h-px ${progressClass}`} />
+      </span>
+    );
+  };
+
   return (
-    <p className="break-words text-3xl leading-relaxed">
-      {sentence.split("").map((expectedChar, index) => {
-        const entry = typed[index];
-        const textClass = entry ? (entry.correct ? "text-white" : "text-red-500") : "text-zinc-500";
+    <p className="break-normal font-mono text-3xl leading-relaxed">
+      {segments.map((segment, segmentIndex) => {
+        const start = nextIndex;
+        nextIndex += segment.chars.length;
+        const isWhitespace = /^\s+$/.test(segment.token);
 
         return (
-          <span key={index} className="relative inline-block">
-            {showCursor && index === cursor && <span className="absolute -left-1 top-0 animate-pulse text-white">|</span>}
-            <span className={textClass}>{expectedChar === " " ? "\u00A0" : expectedChar}</span>
+          <span key={`segment-${start}-${segmentIndex}`} className={isWhitespace ? "inline-block" : "inline-block whitespace-nowrap"}>
+            {segment.chars.map((char, charIndex) => renderChar(char, start + charIndex))}
           </span>
         );
       })}
-      {showCursor && cursor === sentence.length && <span className="ml-0.5 animate-pulse text-white">|</span>}
+      {showCursor && cursor === sentence.length && <span className="relative ml-0.5 inline-block pb-[6px] animate-pulse text-white">|</span>}
+      {opponentCursor === sentence.length && (
+        <span className="relative ml-[1px] inline-block h-[6px] w-px translate-y-[2px] bg-zinc-500/70" />
+      )}
     </p>
-  );
-}
-
-function OpponentProgressLine({ progress }: { progress: number }) {
-  return (
-    <div className="mx-auto mt-4 w-40 md:w-52">
-      <div className="h-[3px] w-full rounded-full bg-zinc-800">
-        <div className="h-[3px] rounded-full bg-zinc-400 transition-[width] duration-150 ease-linear" style={{ width: `${progress}%` }} />
-      </div>
-    </div>
   );
 }
 

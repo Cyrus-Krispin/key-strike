@@ -45,7 +45,6 @@ export type RoomPlayerSnapshot = {
   name: string;
   ready: boolean;
   connected: boolean;
-  health: number;
   cursor: number;
   mistakes: number;
   typed: Array<{

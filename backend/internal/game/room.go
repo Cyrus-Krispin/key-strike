@@ -9,13 +9,8 @@ import (
 	"time"
 )
 
-var sentenceBank = []string{
-	"Stay steady and type with clean intent.",
-	"Rhythm matters more than panic speed.",
-	"Every clean keypress keeps your combo alive.",
-	"Small mistakes cost momentum in this duel.",
-	"Precision under pressure decides this round.",
-}
+const duelSentence = "" +
+	"In this single extended duel sentence, keep your rhythm steady, recover quickly from slips, and focus on clean transitions between words because every keypress adds pressure as both racers push through the same long passage until one reaches the final character."
 
 type Room struct {
 	mu sync.Mutex
@@ -72,14 +67,14 @@ func NewRoom(config RoomConfig) *Room {
 		}
 		r.allowed[id] = struct{}{}
 		r.players[id] = &PlayerState{
-			ID:        id,
-			Name:      name,
-			Ready:     false,
-			Connected: false,
-			Health:    maxHealth,
-			Cursor:    0,
-			Mistakes:  0,
-			Typed:     make([]TypedEntry, 0, 64),
+			ID:            id,
+			Name:          name,
+			Ready:         false,
+			Connected:     false,
+			Cursor:        0,
+			WordLockStart: 0,
+			Mistakes:      0,
+			Typed:         make([]TypedEntry, 0, 64),
 		}
 		r.order = append(r.order, id)
 	}
@@ -102,14 +97,14 @@ func NewRoom(config RoomConfig) *Room {
 
 		r.allowed[botID] = struct{}{}
 		r.players[botID] = &PlayerState{
-			ID:        botID,
-			Name:      botName,
-			Ready:     true,
-			Connected: true,
-			Health:    maxHealth,
-			Cursor:    0,
-			Mistakes:  0,
-			Typed:     make([]TypedEntry, 0, 64),
+			ID:            botID,
+			Name:          botName,
+			Ready:         true,
+			Connected:     true,
+			Cursor:        0,
+			WordLockStart: 0,
+			Mistakes:      0,
+			Typed:         make([]TypedEntry, 0, 64),
 		}
 		r.order = append(r.order, botID)
 	}
@@ -118,7 +113,7 @@ func NewRoom(config RoomConfig) *Room {
 		panic("room requires at least one player")
 	}
 
-	r.sentence = r.pickSentenceLocked()
+	r.sentence = duelSentence
 
 	go r.loop()
 	return r
@@ -280,20 +275,25 @@ func (r *Room) HandleInputChar(playerID, char string) error {
 		return nil
 	}
 
-	expectedRune := sentenceRunes[player.Cursor]
-	correct := strings.EqualFold(string(expectedRune), string(typedRune))
+	if typedRune == ' ' {
+		r.applySpaceJumpLocked(player, sentenceRunes)
+	} else {
+		expectedRune := sentenceRunes[player.Cursor]
+		correct := strings.EqualFold(string(expectedRune), string(typedRune))
 
-	player.Typed = append(player.Typed, TypedEntry{
-		Char:    string(typedRune),
-		Correct: correct,
-	})
-	player.Cursor++
-	if !correct {
-		player.Mistakes++
+		player.Typed = append(player.Typed, TypedEntry{
+			Char:    string(typedRune),
+			Correct: correct,
+		})
+		player.Cursor++
+		if !correct {
+			player.Mistakes++
+		}
+		player.WordLockStart = wordStartForCursor(sentenceRunes, player.Cursor)
 	}
 
 	if player.Cursor >= len(sentenceRunes) {
-		r.resolveSentenceLocked(playerID)
+		r.finishRaceLocked(playerID, len(sentenceRunes))
 	}
 
 	r.updatedAt = time.Now()
@@ -326,6 +326,10 @@ func (r *Room) HandleBackspace(playerID string) error {
 		return errors.New("match is not active")
 	}
 	if player.Cursor <= 0 || len(player.Typed) == 0 {
+		r.mu.Unlock()
+		return nil
+	}
+	if player.Cursor <= player.WordLockStart {
 		r.mu.Unlock()
 		return nil
 	}
@@ -440,46 +444,67 @@ func (r *Room) applyBotInputLocked() bool {
 	if !correct {
 		bot.Mistakes++
 	}
+	bot.WordLockStart = wordStartForCursor(sentenceRunes, bot.Cursor)
 
 	if bot.Cursor >= len(sentenceRunes) {
-		r.resolveSentenceLocked(r.botID)
+		r.finishRaceLocked(r.botID, len(sentenceRunes))
 	}
 	return true
 }
 
-func (r *Room) resolveSentenceLocked(attackerID string) {
-	attacker, ok := r.players[attackerID]
-	if !ok {
+func (r *Room) finishRaceLocked(playerID string, sentenceLen int) {
+	if r.phase != PhaseActive {
 		return
 	}
-	opponentID := r.otherPlayerIDLocked(attackerID)
+	player, ok := r.players[playerID]
+	if !ok || player.Cursor < sentenceLen {
+		return
+	}
+
+	opponentID := r.otherPlayerIDLocked(playerID)
 	if opponentID == "" {
-		return
-	}
-	opponent, ok := r.players[opponentID]
-	if !ok {
-		return
-	}
-
-	damage := calculateDamage(attacker)
-	opponent.Health -= damage
-	if opponent.Health < 0 {
-		opponent.Health = 0
-	}
-
-	if opponent.Health == 0 {
 		r.phase = PhaseEnded
-		r.winner = attackerID
+		r.winner = playerID
+		return
+	}
+	opponent := r.players[opponentID]
+
+	r.phase = PhaseEnded
+	if opponent != nil && opponent.Cursor >= sentenceLen {
+		r.winner = ""
+		return
+	}
+	r.winner = playerID
+}
+
+func (r *Room) applySpaceJumpLocked(player *PlayerState, sentenceRunes []rune) {
+	if player == nil {
+		return
+	}
+	if player.Cursor >= len(sentenceRunes) {
 		return
 	}
 
-	r.sentence = r.pickSentenceLocked()
-	for _, playerID := range r.order {
-		p := r.players[playerID]
-		p.Cursor = 0
-		p.Mistakes = 0
-		p.Typed = p.Typed[:0]
+	start := player.Cursor
+	target := nextWordStartIndex(sentenceRunes, start)
+	if target <= start {
+		target = minInt(start+1, len(sentenceRunes))
 	}
+
+	for idx := start; idx < target; idx++ {
+		expectedRune := sentenceRunes[idx]
+		correct := expectedRune == ' '
+		player.Typed = append(player.Typed, TypedEntry{
+			Char:    " ",
+			Correct: correct,
+		})
+		if !correct {
+			player.Mistakes++
+		}
+	}
+
+	player.Cursor = target
+	player.WordLockStart = wordStartForCursor(sentenceRunes, player.Cursor)
 }
 
 func (r *Room) canStartCountdownLocked() bool {
@@ -506,9 +531,41 @@ func (r *Room) otherPlayerIDLocked(playerID string) string {
 	return ""
 }
 
-func (r *Room) pickSentenceLocked() string {
-	index := r.random.Intn(len(sentenceBank))
-	return sentenceBank[index]
+func nextWordStartIndex(sentence []rune, cursor int) int {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(sentence) {
+		return len(sentence)
+	}
+
+	idx := cursor
+	for idx < len(sentence) && sentence[idx] != ' ' {
+		idx++
+	}
+	for idx < len(sentence) && sentence[idx] == ' ' {
+		idx++
+	}
+	return idx
+}
+
+func wordStartForCursor(sentence []rune, cursor int) int {
+	if len(sentence) == 0 || cursor <= 0 {
+		return 0
+	}
+	if cursor > len(sentence) {
+		cursor = len(sentence)
+	}
+
+	if sentence[cursor-1] == ' ' {
+		return cursor
+	}
+
+	start := cursor - 1
+	for start >= 0 && sentence[start] != ' ' {
+		start--
+	}
+	return start + 1
 }
 
 func (r *Room) snapshotLocked(now time.Time) RoomSnapshot {
@@ -531,7 +588,6 @@ func (r *Room) snapshotLocked(now time.Time) RoomSnapshot {
 			Name:      player.Name,
 			Ready:     player.Ready,
 			Connected: player.Connected,
-			Health:    player.Health,
 			Cursor:    player.Cursor,
 			Mistakes:  player.Mistakes,
 			Typed:     typed,
@@ -568,31 +624,6 @@ func broadcast(sessions []*Session, event ServerEvent) {
 	}
 }
 
-func calculateDamage(attacker *PlayerState) int {
-	if attacker == nil {
-		return 3
-	}
-	correctCount := 0
-	for _, entry := range attacker.Typed {
-		if entry.Correct {
-			correctCount++
-		}
-	}
-	accuracy := 0.0
-	if len(attacker.Typed) > 0 {
-		accuracy = float64(correctCount) / float64(len(attacker.Typed))
-	}
-
-	damage := 6 + int(accuracy*6) - min(3, attacker.Mistakes/2)
-	if damage < 3 {
-		damage = 3
-	}
-	if damage > 16 {
-		damage = 16
-	}
-	return damage
-}
-
 func randomWrongRune(expected rune, random *rand.Rand) rune {
 	pool := []rune("abcdefghijklmnopqrstuvwxyz")
 	if len(pool) == 0 {
@@ -605,7 +636,7 @@ func randomWrongRune(expected rune, random *rand.Rand) rune {
 	return candidate
 }
 
-func min(a, b int) int {
+func minInt(a, b int) int {
 	if a < b {
 		return a
 	}

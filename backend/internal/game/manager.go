@@ -93,14 +93,26 @@ func (m *Manager) Queue(req QueueRequest) (QueueResponse, error) {
 			delete(m.assignments, playerID)
 		} else {
 			snapshot := room.Snapshot()
-			opponent := findOpponent(snapshot, playerID)
-			return QueueResponse{
-				Status:   "matched",
-				Mode:     snapshot.Mode,
-				RoomID:   snapshot.RoomID,
-				Opponent: opponent,
-				WSPath:   buildWSPath(snapshot.RoomID, playerID),
-			}, nil
+
+			// Bot requests should always create a brand-new room. We also clear stale
+			// or mode-mismatched assignments so queueing starts fresh.
+			shouldReuse := snapshot.Phase != PhaseEnded && snapshot.Mode == mode && mode != "bot"
+			if shouldReuse {
+				opponent := findOpponent(snapshot, playerID)
+				return QueueResponse{
+					Status:   "matched",
+					Mode:     snapshot.Mode,
+					RoomID:   snapshot.RoomID,
+					Opponent: opponent,
+					WSPath:   buildWSPath(snapshot.RoomID, playerID),
+				}, nil
+			}
+
+			delete(m.assignments, playerID)
+			if snapshot.Mode == "bot" {
+				room.Close()
+				delete(m.rooms, assignedRoomID)
+			}
 		}
 	}
 

@@ -15,7 +15,6 @@ const (
 )
 
 const (
-	maxHealth         = 100
 	countdownDuration = 3 * time.Second
 )
 
@@ -44,14 +43,14 @@ type TypedEntry struct {
 }
 
 type PlayerState struct {
-	ID        string
-	Name      string
-	Ready     bool
-	Connected bool
-	Health    int
-	Cursor    int
-	Mistakes  int
-	Typed     []TypedEntry
+	ID            string
+	Name          string
+	Ready         bool
+	Connected     bool
+	Cursor        int
+	WordLockStart int
+	Mistakes      int
+	Typed         []TypedEntry
 }
 
 type PlayerSnapshot struct {
@@ -59,7 +58,6 @@ type PlayerSnapshot struct {
 	Name      string       `json:"name"`
 	Ready     bool         `json:"ready"`
 	Connected bool         `json:"connected"`
-	Health    int          `json:"health"`
 	Cursor    int          `json:"cursor"`
 	Mistakes  int          `json:"mistakes"`
 	Typed     []TypedEntry `json:"typed"`
