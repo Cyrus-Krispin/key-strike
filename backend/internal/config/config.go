@@ -7,16 +7,26 @@ import (
 )
 
 type Config struct {
-	Port          string
-	AllowedOrigin string
+	Port                   string
+	AllowedOrigin          string
+	ClerkSecretKey         string
+	ClerkAuthorizedParties []string
 }
 
 func Load() Config {
 	loadLocalEnvFiles()
 
+	allowedOrigin := getEnv("ALLOWED_ORIGIN", "*")
+	clerkAuthorizedParties := splitCSV(getEnv("CLERK_AUTHORIZED_PARTIES", ""))
+	if len(clerkAuthorizedParties) == 0 && allowedOrigin != "*" {
+		clerkAuthorizedParties = append(clerkAuthorizedParties, allowedOrigin)
+	}
+
 	return Config{
-		Port:          getEnv("PORT", "8080"),
-		AllowedOrigin: getEnv("ALLOWED_ORIGIN", "*"),
+		Port:                   getEnv("PORT", "8080"),
+		AllowedOrigin:          allowedOrigin,
+		ClerkSecretKey:         getEnv("CLERK_SECRET_KEY", ""),
+		ClerkAuthorizedParties: clerkAuthorizedParties,
 	}
 }
 
@@ -81,5 +91,18 @@ func parseEnvFile(path string) map[string]string {
 		values[key] = value
 	}
 
+	return values
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		values = append(values, trimmed)
+	}
 	return values
 }

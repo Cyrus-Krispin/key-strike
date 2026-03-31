@@ -12,34 +12,54 @@ import (
 )
 
 func (h *Handler) RoomState(w http.ResponseWriter, r *http.Request) {
+	playerID, err := authenticatedPlayerID(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
 	roomID := strings.TrimSpace(r.PathValue("roomId"))
 	if roomID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "roomId is required"})
 		return
 	}
 
-	snapshot, ok := h.rooms.RoomSnapshot(roomID)
+	room, ok := h.rooms.GetRoom(roomID)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "room not found"})
 		return
 	}
+	if !room.AllowsPlayer(playerID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
+		return
+	}
+
+	snapshot := room.Snapshot()
 
 	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (h *Handler) RoomWebSocket(w http.ResponseWriter, r *http.Request) {
 	roomID := strings.TrimSpace(r.URL.Query().Get("roomId"))
-	playerID := strings.TrimSpace(r.URL.Query().Get("playerId"))
 	playerName := strings.TrimSpace(r.URL.Query().Get("playerName"))
+	playerID, err := h.verifyWebSocketSession(r)
 
-	if roomID == "" || playerID == "" {
-		http.Error(w, "roomId and playerId are required", http.StatusBadRequest)
+	if roomID == "" {
+		http.Error(w, "roomId is required", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	room, ok := h.rooms.GetRoom(roomID)
 	if !ok {
 		http.Error(w, "room not found", http.StatusNotFound)
+		return
+	}
+	if !room.AllowsPlayer(playerID) {
+		http.Error(w, "room access denied", http.StatusForbidden)
 		return
 	}
 

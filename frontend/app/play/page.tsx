@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { useAuth, useUser } from "@clerk/nextjs";
 import {
   buildWebSocketUrl,
   cancelMatchmaking,
@@ -51,10 +52,9 @@ const PLAYER_PROFILE: MatchProfile = {
   avatar: "KB-01"
 };
 
-const PLAYER_ID_STORAGE_KEY = "key_strike_player_id";
-const PLAYER_NAME_STORAGE_KEY = "key_strike_player_name";
-
 export default function PlayPage() {
+  const { getToken, isLoaded, isSignedIn, userId } = useAuth();
+  const { user } = useUser();
   const router = useRouter();
   const pathname = usePathname();
   const socketRef = useRef<WebSocket | null>(null);
@@ -94,23 +94,22 @@ export default function PlayPage() {
     readyRequestSentRef.current = playerReady;
   }, [playerReady]);
 
+  const getBackendToken = useCallback(async () => {
+    const token = await getToken();
+    if (!token) {
+      throw new Error("Unable to get session token.");
+    }
+    return token;
+  }, [getToken]);
+
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (!isLoaded || !isSignedIn || !userId) return;
 
-    let playerID = window.localStorage.getItem(PLAYER_ID_STORAGE_KEY);
-    if (!playerID) {
-      playerID = `player-${Math.random().toString(36).slice(2, 10)}`;
-      window.localStorage.setItem(PLAYER_ID_STORAGE_KEY, playerID);
-    }
-
-    let playerName = window.localStorage.getItem(PLAYER_NAME_STORAGE_KEY);
-    if (!playerName) {
-      playerName = `Typer-${playerID.slice(-4).toUpperCase()}`;
-      window.localStorage.setItem(PLAYER_NAME_STORAGE_KEY, playerName);
-    }
-
-    setLocalPlayer({ id: playerID, name: playerName });
-  }, []);
+    setLocalPlayer({
+      id: userId,
+      name: resolvePlayerName(userId, user?.username ?? null, user?.fullName ?? null, user?.primaryEmailAddress?.emailAddress ?? null)
+    });
+  }, [isLoaded, isSignedIn, user, userId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -143,7 +142,8 @@ export default function PlayPage() {
 
     const bootstrapRoom = async () => {
       try {
-        const snapshot = await getRoomState(routeBattleId);
+        const token = await getBackendToken();
+        const snapshot = await getRoomState(routeBattleId, token);
         if (cancelled) return;
 
         setRoomState(snapshot);
@@ -162,50 +162,67 @@ export default function PlayPage() {
     return () => {
       cancelled = true;
     };
-  }, [routeBattleId, localPlayer, routeMode, routeDifficulty]);
+  }, [routeBattleId, localPlayer, routeMode, routeDifficulty, getBackendToken]);
 
   useEffect(() => {
     if (!routeBattleId || !localPlayer) return;
 
-    const wsPath = `/ws/room?roomId=${encodeURIComponent(routeBattleId)}&playerId=${encodeURIComponent(localPlayer.id)}&playerName=${encodeURIComponent(localPlayer.name)}`;
-    const ws = new WebSocket(buildWebSocketUrl(wsPath));
-    socketRef.current = ws;
+    let cancelled = false;
+    let ws: WebSocket | null = null;
 
-    ws.onopen = () => {
-      setSocketConnected(true);
-      setConnectionError(null);
-    };
-
-    ws.onclose = () => {
-      setSocketConnected(false);
-    };
-
-    ws.onerror = () => {
-      setConnectionError("Realtime connection failed.");
-    };
-
-    ws.onmessage = (message) => {
+    const connect = async () => {
       try {
-        const event = JSON.parse(message.data) as SocketServerEvent;
-        if (event.type === "state_update" && event.payload) {
-          setRoomState(event.payload);
-          return;
-        }
-        if (event.type === "error" && event.error) {
-          setConnectionError(event.error);
-        }
+        const token = await getBackendToken();
+        if (cancelled) return;
+
+        const wsPath = `/ws/room?roomId=${encodeURIComponent(routeBattleId)}&playerName=${encodeURIComponent(localPlayer.name)}&token=${encodeURIComponent(token)}`;
+        ws = new WebSocket(buildWebSocketUrl(wsPath));
+        socketRef.current = ws;
+
+        ws.onopen = () => {
+          setSocketConnected(true);
+          setConnectionError(null);
+        };
+
+        ws.onclose = () => {
+          setSocketConnected(false);
+        };
+
+        ws.onerror = () => {
+          setConnectionError("Realtime connection failed.");
+        };
+
+        ws.onmessage = (message) => {
+          try {
+            const event = JSON.parse(message.data) as SocketServerEvent;
+            if (event.type === "state_update" && event.payload) {
+              setRoomState(event.payload);
+              return;
+            }
+            if (event.type === "error" && event.error) {
+              setConnectionError(event.error);
+            }
+          } catch {
+            setConnectionError("Received invalid realtime payload.");
+          }
+        };
       } catch {
-        setConnectionError("Received invalid realtime payload.");
+        if (!cancelled) {
+          setConnectionError("Unable to authorize realtime connection.");
+        }
       }
     };
 
+    void connect();
+
     return () => {
-      ws.close();
-      if (socketRef.current === ws) {
+      cancelled = true;
+      ws?.close();
+      if (ws && socketRef.current === ws) {
         socketRef.current = null;
       }
     };
-  }, [routeBattleId, localPlayer]);
+  }, [routeBattleId, localPlayer, getBackendToken]);
 
   useEffect(() => {
     if (!roomState || !localPlayer) return;
@@ -221,7 +238,8 @@ export default function PlayPage() {
     let cancelled = false;
     const interval = setInterval(async () => {
       try {
-        const status = await getMatchmakingStatus(localPlayer.id);
+        const token = await getBackendToken();
+        const status = await getMatchmakingStatus(token);
         if (cancelled) return;
 
         if (status.status === "matched" && status.roomId) {
@@ -241,7 +259,7 @@ export default function PlayPage() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [pendingMatch, localPlayer, router]);
+  }, [pendingMatch, localPlayer, router, getBackendToken]);
 
   useEffect(() => {
     if (screen !== "vs_intro" || !matchContext) return;
@@ -397,14 +415,14 @@ export default function PlayPage() {
     const requestID = ++queueRequestIdRef.current;
 
     try {
-      await cancelMatchmaking(localPlayer.id).catch(() => undefined);
+      const token = await getBackendToken();
+      await cancelMatchmaking(token).catch(() => undefined);
 
       const response = await queueMatchmaking({
-        playerId: localPlayer.id,
         playerName: localPlayer.name,
         mode,
         difficulty: difficulty ?? undefined
-      });
+      }, token);
 
       if (queueRequestIdRef.current !== requestID) {
         return;
@@ -424,7 +442,12 @@ export default function PlayPage() {
 
   const handleBackToLobby = async () => {
     if (localPlayer) {
-      await cancelMatchmaking(localPlayer.id).catch(() => undefined);
+      try {
+        const token = await getBackendToken();
+        await cancelMatchmaking(token).catch(() => undefined);
+      } catch {
+        // Continue local cleanup even if auth token fetch fails.
+      }
     }
 
     if (socketRef.current) {
@@ -440,6 +463,14 @@ export default function PlayPage() {
     setScreen("lobby");
     router.push("/");
   };
+
+  if (!isLoaded) {
+    return <section className="rounded-xl border border-white/25 bg-black p-6 text-zinc-300">Loading auth session...</section>;
+  }
+
+  if (!isSignedIn) {
+    return null;
+  }
 
   if (!matchContext && routeBattleId) {
     return <section className="fixed inset-0 z-50 h-[100dvh] w-screen bg-black" />;
@@ -840,4 +871,11 @@ function inferBotDifficulty(snapshot: RoomSnapshot): BotDifficulty {
   if (name.includes("hard")) return "hard";
   if (name.includes("easy")) return "easy";
   return "medium";
+}
+
+function resolvePlayerName(userID: string, username: string | null, fullName: string | null, email: string | null) {
+  if (username && username.trim()) return username.trim();
+  if (fullName && fullName.trim()) return fullName.trim();
+  if (email && email.trim()) return email.trim().split("@")[0];
+  return `Typer-${userID.slice(-4).toUpperCase()}`;
 }

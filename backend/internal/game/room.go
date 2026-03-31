@@ -123,6 +123,18 @@ func (r *Room) ID() string {
 	return r.id
 }
 
+func (r *Room) AllowsPlayer(playerID string) bool {
+	id := strings.TrimSpace(playerID)
+	if id == "" {
+		return false
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.allowed[id]
+	return ok
+}
+
 func (r *Room) Snapshot() RoomSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()

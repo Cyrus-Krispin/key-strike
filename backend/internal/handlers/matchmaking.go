@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -8,7 +11,6 @@ import (
 )
 
 type queueRequestBody struct {
-	PlayerID   string `json:"playerId"`
 	PlayerName string `json:"playerName"`
 	Mode       string `json:"mode"`
 	Difficulty string `json:"difficulty,omitempty"`
@@ -19,15 +21,26 @@ type cancelQueueBody struct {
 }
 
 func (h *Handler) MatchmakingQueue(w http.ResponseWriter, r *http.Request) {
+	playerID, err := authenticatedPlayerID(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
 	var body queueRequestBody
 	if err := decodeJSON(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
 
+	playerName := strings.TrimSpace(body.PlayerName)
+	if playerName == "" {
+		playerName = defaultPlayerName(playerID)
+	}
+
 	response, err := h.rooms.Queue(game.QueueRequest{
-		PlayerID:   body.PlayerID,
-		PlayerName: body.PlayerName,
+		PlayerID:   playerID,
+		PlayerName: playerName,
 		Mode:       body.Mode,
 		Difficulty: body.Difficulty,
 	})
@@ -40,15 +53,21 @@ func (h *Handler) MatchmakingQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) MatchmakingCancel(w http.ResponseWriter, r *http.Request) {
+	playerID, err := authenticatedPlayerID(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
 	var body cancelQueueBody
-	if err := decodeJSON(r, &body); err != nil {
+	if err := decodeJSONOptional(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
 
-	playerID := strings.TrimSpace(body.PlayerID)
-	if playerID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "playerId is required"})
+	requestedPlayerID := strings.TrimSpace(body.PlayerID)
+	if requestedPlayerID != "" && requestedPlayerID != playerID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "playerId mismatch"})
 		return
 	}
 
@@ -59,14 +78,22 @@ func (h *Handler) MatchmakingCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) MatchmakingStatus(w http.ResponseWriter, r *http.Request) {
-	playerID := strings.TrimSpace(r.URL.Query().Get("playerId"))
-	if playerID == "" {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":    "idle",
-			"queueSize": h.rooms.QueueDepth(),
-		})
+	playerID, err := authenticatedPlayerID(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, h.rooms.Status(playerID))
+}
+
+func decodeJSONOptional(r *http.Request, target any) error {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(target); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }

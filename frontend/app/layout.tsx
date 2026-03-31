@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { VT323 } from "next/font/google";
+import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 import { Navbar } from "@/components/Navbar";
 
@@ -17,10 +18,12 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="en">
       <body className={vt323.className}>
-        <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-5">
-          <Navbar />
-          <main className="mt-6 flex-1">{children}</main>
-        </div>
+        <ClerkProvider>
+          <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-5">
+            <Navbar />
+            <main className="mt-6 flex-1">{children}</main>
+          </div>
+        </ClerkProvider>
       </body>
     </html>
   );

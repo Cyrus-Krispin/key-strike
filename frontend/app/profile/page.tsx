@@ -1,29 +1,39 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useAuth } from "@clerk/nextjs";
 import { getProfile, type Profile } from "@/lib/api";
 
 export default function ProfilePage() {
+  const { getToken, isLoaded, isSignedIn } = useAuth();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!isLoaded || !isSignedIn) return;
+
     let mounted = true;
-    getProfile()
-      .then((data) => {
+    void (async () => {
+      try {
+        const token = await getToken();
+        if (!token) {
+          throw new Error("Missing auth token");
+        }
+        const data = await getProfile(token);
         if (mounted) {
           setProfile(data);
         }
-      })
-      .catch(() => {
+      } catch {
         if (mounted) {
           setError("Unable to load profile from API.");
         }
-      });
+      }
+    })();
+
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [getToken, isLoaded, isSignedIn]);
 
   return (
     <section className="rounded-xl border border-white/25 bg-black p-6">

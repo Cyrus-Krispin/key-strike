@@ -12,7 +12,6 @@ export type MatchmakingMode = "ranked" | "casual" | "bot";
 export type BotDifficulty = "easy" | "medium" | "hard";
 
 export type QueueRequest = {
-  playerId: string;
   playerName: string;
   mode: MatchmakingMode;
   difficulty?: BotDifficulty;
@@ -67,13 +66,20 @@ export type RoomSnapshot = {
 type RequestInitExtended = {
   method?: "GET" | "POST";
   body?: unknown;
+  token: string;
 };
 
 async function request<T>(path: string, init?: RequestInitExtended): Promise<T> {
+  const token = init?.token?.trim();
+  if (!token) {
+    throw new Error("Missing auth token.");
+  }
+
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: init?.method ?? "GET",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`
     },
     body: init?.body ? JSON.stringify(init.body) : undefined,
     cache: "no-store"
@@ -86,31 +92,32 @@ async function request<T>(path: string, init?: RequestInitExtended): Promise<T> 
   return response.json() as Promise<T>;
 }
 
-export function getProfile() {
-  return request<Profile>("/api/profile");
+export function getProfile(token: string) {
+  return request<Profile>("/api/profile", { token });
 }
 
-export function queueMatchmaking(payload: QueueRequest) {
+export function queueMatchmaking(payload: QueueRequest, token: string) {
   return request<QueueResponse>("/api/matchmaking/queue", {
     method: "POST",
-    body: payload
+    body: payload,
+    token
   });
 }
 
-export function cancelMatchmaking(playerId: string) {
+export function cancelMatchmaking(token: string) {
   return request<{ removed: boolean }>("/api/matchmaking/cancel", {
     method: "POST",
-    body: { playerId }
+    body: {},
+    token
   });
 }
 
-export function getMatchmakingStatus(playerId: string) {
-  const query = new URLSearchParams({ playerId });
-  return request<MatchmakingStatusResponse>(`/api/matchmaking/status?${query.toString()}`);
+export function getMatchmakingStatus(token: string) {
+  return request<MatchmakingStatusResponse>("/api/matchmaking/status", { token });
 }
 
-export function getRoomState(roomId: string) {
-  return request<RoomSnapshot>(`/api/rooms/${encodeURIComponent(roomId)}/state`);
+export function getRoomState(roomId: string, token: string) {
+  return request<RoomSnapshot>(`/api/rooms/${encodeURIComponent(roomId)}/state`, { token });
 }
 
 export function getApiBaseUrl() {
