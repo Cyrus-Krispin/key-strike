@@ -2,6 +2,7 @@ package game
 
 import (
 	"errors"
+	"log"
 	"math"
 	"math/rand"
 	"strings"
@@ -169,6 +170,7 @@ func (r *Room) Connect(session *Session) (RoomSnapshot, error) {
 	}
 	r.sessions[playerID] = session
 	r.updatedAt = time.Now()
+	log.Printf("room connect: room_id=%s player_id=%s player_name=%q phase=%s", r.id, playerID, player.Name, r.phase)
 
 	snapshot := r.snapshotLocked(r.updatedAt)
 	sessions := r.sessionListLocked()
@@ -196,10 +198,12 @@ func (r *Room) Disconnect(playerID string) {
 		player.Connected = false
 		player.Ready = false
 	}
+	log.Printf("room disconnect: room_id=%s player_id=%s phase=%s ready_reset=%t", r.id, playerID, r.phase, playerID != r.botID)
 
 	if r.phase == PhaseCountdown && !r.canStartCountdownLocked() {
 		r.phase = PhaseWaiting
 		r.countdownEndsAt = time.Time{}
+		log.Printf("room countdown_cancelled: room_id=%s reason=player_unready_or_disconnected", r.id)
 	}
 
 	r.updatedAt = time.Now()
@@ -236,13 +240,16 @@ func (r *Room) SetReady(playerID string, ready bool) error {
 	}
 
 	player.Ready = ready
+	log.Printf("room ready_set: room_id=%s player_id=%s ready=%t phase=%s connected=%t", r.id, playerID, ready, r.phase, player.Connected)
 	if r.phase == PhaseWaiting && r.canStartCountdownLocked() {
 		r.phase = PhaseCountdown
 		r.countdownEndsAt = time.Now().Add(countdownDuration)
+		log.Printf("room countdown_started: room_id=%s", r.id)
 	}
 	if r.phase == PhaseCountdown && !r.canStartCountdownLocked() {
 		r.phase = PhaseWaiting
 		r.countdownEndsAt = time.Time{}
+		log.Printf("room countdown_cancelled: room_id=%s reason=readiness_changed", r.id)
 	}
 
 	r.updatedAt = time.Now()
@@ -396,6 +403,7 @@ func (r *Room) tick() {
 		if r.botID != "" {
 			r.botNextTypeAt = now.Add(r.botTypeInterval)
 		}
+		log.Printf("room phase_transition: room_id=%s from=%s to=%s", r.id, PhaseCountdown, PhaseActive)
 		changed = true
 	}
 
@@ -484,9 +492,11 @@ func (r *Room) finishRaceLocked(playerID string, sentenceLen int) {
 	r.phase = PhaseEnded
 	if opponent != nil && opponent.Cursor >= sentenceLen {
 		r.winner = ""
+		log.Printf("room race_finished: room_id=%s winner=draw", r.id)
 		return
 	}
 	r.winner = playerID
+	log.Printf("room race_finished: room_id=%s winner_player_id=%s", r.id, playerID)
 }
 
 func (r *Room) applySpaceJumpLocked(player *PlayerState, sentenceRunes []rune) {
