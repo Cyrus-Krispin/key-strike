@@ -71,6 +71,8 @@ export default function PlayPage() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
   const [localPlayer, setLocalPlayer] = useState<{ id: string; name: string } | null>(null);
+  const playerId = localPlayer?.id ?? "";
+  const playerName = localPlayer?.name ?? "";
 
   const routeBattleId = useMemo(() => {
     const match = pathname.match(/^\/play\/([^/]+)$/);
@@ -105,11 +107,27 @@ export default function PlayPage() {
   useEffect(() => {
     if (!isLoaded || !isSignedIn || !userId) return;
 
-    setLocalPlayer({
-      id: userId,
-      name: resolvePlayerName(userId, user?.username ?? null, user?.fullName ?? null, user?.primaryEmailAddress?.emailAddress ?? null)
+    const name = resolvePlayerName(
+      userId,
+      user?.username ?? null,
+      user?.fullName ?? null,
+      user?.primaryEmailAddress?.emailAddress ?? null
+    );
+
+    setLocalPlayer((prev) => {
+      if (prev && prev.id === userId && prev.name === name) {
+        return prev;
+      }
+      return { id: userId, name };
     });
-  }, [isLoaded, isSignedIn, user, userId]);
+  }, [
+    isLoaded,
+    isSignedIn,
+    userId,
+    user?.username,
+    user?.fullName,
+    user?.primaryEmailAddress?.emailAddress
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -165,7 +183,7 @@ export default function PlayPage() {
   }, [routeBattleId, localPlayer, routeMode, routeDifficulty, getBackendToken]);
 
   useEffect(() => {
-    if (!routeBattleId || !localPlayer) return;
+    if (!routeBattleId || !playerId) return;
 
     let cancelled = false;
     let ws: WebSocket | null = null;
@@ -175,7 +193,7 @@ export default function PlayPage() {
         const token = await getBackendToken();
         if (cancelled) return;
 
-        const wsPath = `/ws/room?roomId=${encodeURIComponent(routeBattleId)}&playerName=${encodeURIComponent(localPlayer.name)}&token=${encodeURIComponent(token)}`;
+        const wsPath = `/ws/room?roomId=${encodeURIComponent(routeBattleId)}&playerName=${encodeURIComponent(playerName)}&token=${encodeURIComponent(token)}`;
         ws = new WebSocket(buildWebSocketUrl(wsPath));
         socketRef.current = ws;
 
@@ -222,7 +240,7 @@ export default function PlayPage() {
         socketRef.current = null;
       }
     };
-  }, [routeBattleId, localPlayer, getBackendToken]);
+  }, [routeBattleId, playerId, playerName, getBackendToken]);
 
   useEffect(() => {
     if (!roomState || !localPlayer) return;
